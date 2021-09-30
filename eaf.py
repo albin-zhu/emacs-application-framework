@@ -557,7 +557,7 @@ if __name__ == "__main__":
             "--enable-gpu-rasterization",
             "--enable-native-gpu-memory-buffers"]
 
-    app = QApplication(sys.argv + ["--disable-web-security"] + hardware_acceleration_args)
+    app = QApplication(sys.argv + ["--disable-web-security", "--no-sandbox"] + hardware_acceleration_args)
 
     eaf = EAF(sys.argv[1:])
 
