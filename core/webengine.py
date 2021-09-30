@@ -196,6 +196,13 @@ class BrowserView(QWebEngineView):
             else:
                 self.buffer.caret_exit()
 
+        # Need wrap hasSelection, otherwise close web page will cause webengine crash.
+        try:
+            if self.web_page.hasSelection():
+                self.triggerPageAction(self.web_page.Unselect)
+        except:
+            pass
+
     def select_text_change(self):
         ''' Change selected text.'''
         # Not translate text if just exit caret mode.
