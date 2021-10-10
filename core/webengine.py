@@ -19,6 +19,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from typing import Protocol
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import QUrl, Qt, QEvent, QEventLoop, QVariant, QTimer, QFile
 from PyQt5.QtGui import QColor, QScreen
@@ -1158,6 +1159,14 @@ class BrowserBuffer(Buffer):
     def translate_text(self):
         if self.buffer_widget.selectedText().strip() != "":
             self.buffer_widget.translate_selected_text.emit(self.buffer_widget.selectedText())
+
+    @interactive(insert_or_do=True)
+    def capture(self):
+        selection = self.buffer_widget.selectedText().strip()
+        print (f"albin capture: {selection}")
+        if selection != "":
+            selection = " :eaf:\n#+begin_quote\n" + selection + "#+end_quote"
+            eval_in_emacs("eaf-capture-text", [self.buffer_widget.get_url(), self.title, selection])
 
     def copy_text(self):
         ''' Copy selected text.'''
