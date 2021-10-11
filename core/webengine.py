@@ -1165,7 +1165,7 @@ class BrowserBuffer(Buffer):
         selection = self.buffer_widget.selectedText().strip()
         print (f"albin capture: {selection}")
         if selection != "":
-            selection = " :eaf:\n#+begin_quote\n" + selection + "#+end_quote"
+            selection = " :eaf:\n#+begin_quote\n" + selection + "\n#+end_quote"
             eval_in_emacs("eaf-capture-text", [self.buffer_widget.get_url(), self.title, selection])
 
     def copy_text(self):
