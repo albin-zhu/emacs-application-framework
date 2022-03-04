@@ -149,8 +149,8 @@
     "rss-reader": {
         "name": "EAF RSS Reader",
         "type": "app",
-        "branch": "main",
-        "url": "https://github.com/ShaoChenHeng/eaf-rss-reader.git",
-        "mirror_url": "https://gitee.com/ShaoChenHeng/eaf-rss-reader.git"
+        "branch": "master",
+        "url": "https://github.com/emacs-eaf/eaf-rss-reader.git",
+        "mirror_url": "https://gitee.com/emacs-eaf/eaf-rss-reader.git"
     }
 }
