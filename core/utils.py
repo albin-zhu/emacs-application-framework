@@ -19,7 +19,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
+import sexpdata
 
 class PostGui(QObject):
 
@@ -32,7 +33,7 @@ class PostGui(QObject):
 
     def __call__(self, func):
         self._func = func
-        
+
         from functools import wraps
 
         @wraps(func)
@@ -57,7 +58,7 @@ class PostGui(QObject):
 
 def touch(path):
     import os
-    
+
     if not os.path.exists(path):
         basedir = os.path.dirname(path)
 
@@ -72,7 +73,7 @@ def get_free_port():
     Determines a free port using sockets.
     """
     import socket
-    
+
     free_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     free_socket.bind(('0.0.0.0', 0))
     free_socket.listen(5)
@@ -83,7 +84,7 @@ def get_free_port():
 
 def is_port_in_use(port):
     import socket
-    
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(('localhost', port)) == 0
 
@@ -137,7 +138,7 @@ def call_and_check_code(popen_args, on_exit, stdout_file=None):
         retcode = subprocess.call(popen_args, stdout=stdout_file)
         on_exit(retcode)
         return
-    
+
     import threading
 
     thread = threading.Thread(target=run_in_thread, args=(on_exit, popen_args))
@@ -147,8 +148,8 @@ def call_and_check_code(popen_args, on_exit, stdout_file=None):
 
 def get_clipboard_text():
     ''' Get text from system clipboard.'''
-    from PyQt5.QtWidgets import QApplication
-    from PyQt5.QtGui import QClipboard
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtGui import QClipboard
 
     clipboard = QApplication.clipboard()
     text = clipboard.text()
@@ -156,20 +157,20 @@ def get_clipboard_text():
         return text
 
     if clipboard.supportsSelection():
-        return clipboard.text(QClipboard.Selection)
+        return clipboard.text(QClipboard.Mode.Selection)
 
     return ""
 
 def set_clipboard_text(text):
     ''' Set text to system clipboard.'''
-    from PyQt5.QtWidgets import QApplication
-    from PyQt5.QtGui import QClipboard
-    
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtGui import QClipboard
+
     clipboard = QApplication.clipboard()
     clipboard.setText(text)
 
     if clipboard.supportsSelection():
-        clipboard.setText(text, QClipboard.Selection)
+        clipboard.setText(text, QClipboard.Mode.Selection)
 
 
 def interactive(insert_or_do = False, msg_emacs = None, new_name = None):
@@ -178,12 +179,12 @@ def interactive(insert_or_do = False, msg_emacs = None, new_name = None):
     """
     def wrap(f, insert_or_do = insert_or_do, msg_emacs = msg_emacs, new_name = new_name):
         from functools import wraps
-        
+
         f.interactive = True
         f.insert_or_do = insert_or_do
         f.msg_emacs = msg_emacs
         f.new_name = new_name
-        
+
         @wraps(f)
         def wrapped_f(*args, **kwargs):
             return f(*args, **kwargs)
@@ -204,7 +205,7 @@ def abstract(f):
     implementation check.
     """
     from functools import wraps
-    
+
     f.abstract = True
     @wraps(f)
     def wrap(*args, **kwargs):
@@ -215,7 +216,7 @@ epc_client = None
 
 def init_epc_client(emacs_server_port):
     from epc.client import EPCClient
-    
+
     global epc_client
 
     if epc_client == None:
@@ -231,32 +232,38 @@ def close_epc_client():
     if epc_client != None:
         epc_client.close()
 
-def convert_arg_to_str(arg):
-    if type(arg) == str:
-        return arg
-    elif type(arg) == bool:
-        arg = str(arg).upper()
-    elif type(arg) == list:
-        new_arg = ""
-        for a in arg:
-            new_arg = new_arg + " " + convert_arg_to_str(a)
-        arg = "(" + new_arg[1:] + ")"
-    return arg
+
+def handle_arg_types(arg):
+    if type(arg) is str and arg.startswith("'"):
+        arg = sexpdata.Symbol(arg.partition("'")[2])
+
+    return sexpdata.Quoted(arg)
+
 
 def eval_in_emacs(method_name, args):
     global epc_client
 
-    if epc_client == None:
-        print("Please call init_epc_client first before callling eval_in_emacs.")
-    else:
-        args = list(map(convert_arg_to_str, args))
-        # Make argument encode with Base64, avoid string quote problem pass to elisp side.
-        args = list(map(string_to_base64, args))
+    args = [sexpdata.Symbol(method_name)] + list(map(handle_arg_types, args))    # type: ignore
+    sexp = sexpdata.dumps(args)
 
-        args.insert(0, method_name)
+    epc_client.call("eval-in-emacs", [sexp])    # type: ignore
 
-        # Call eval-in-emacs elisp function.
-        epc_client.call("eval-in-emacs", args)
+
+def get_emacs_func_result(method_name, args):
+    global epc_client
+
+    args = [sexpdata.Symbol(method_name)] + list(map(handle_arg_types, args))    # type: ignore
+    sexp = sexpdata.dumps(args)
+
+    result = epc_client.call_sync("get-emacs-func-result", [sexp])    # type: ignore
+    return result if result != [] else False
+
+def get_app_dark_mode(app_dark_mode_var):
+    app_dark_mode = get_emacs_var(app_dark_mode_var)
+    return (app_dark_mode == "force" or \
+            app_dark_mode == True or \
+            (app_dark_mode == "follow" and \
+             get_emacs_theme_mode() == "dark"))
 
 def get_emacs_theme_mode():
     return get_emacs_func_result("eaf-get-theme-mode", [])
@@ -266,22 +273,6 @@ def get_emacs_theme_background():
 
 def get_emacs_theme_foreground():
     return get_emacs_func_result("eaf-get-theme-foreground-color", [])
-
-def get_emacs_func_result(method_name, args):
-    global epc_client
-
-    if epc_client == None:
-        print("Please call init_epc_client first before callling eval_in_emacs.")
-    else:
-        args = list(map(convert_arg_to_str, args))
-        # Make argument encode with Base64, avoid string quote problem pass to elisp side.
-        args = list(map(string_to_base64, args))
-
-        args.insert(0, method_name)
-
-        # Call eval-in-emacs elisp function synchronously and return the result
-        result = epc_client.call_sync("eval-in-emacs", args)
-        return result if result != [] else False
 
 def message_to_emacs(message, prefix=True, logging=True):
     eval_in_emacs('eaf--show-message', [message, prefix, logging])
@@ -307,8 +298,8 @@ def open_url_in_new_tab_other_window(url):
 def translate_text(text):
     eval_in_emacs('eaf-translate-text', [text])
 
-def input_message(buffer_id, message, callback_tag, input_type, input_content):
-    eval_in_emacs('eaf--input-message', [buffer_id, message, callback_tag, input_type, input_content])
+def input_message(buffer_id, message, callback_tag, input_type, input_content, completion_list):
+    eval_in_emacs('eaf--input-message', [buffer_id, message, callback_tag, input_type, input_content, completion_list])
 
 def focus_emacs_buffer(buffer_id):
     eval_in_emacs('eaf-focus-buffer', [buffer_id])
@@ -325,12 +316,12 @@ def convert_emacs_bool(symbol_value, symbol_is_boolean):
 def get_emacs_vars(args):
     global epc_client
 
-    return list(map(lambda result: convert_emacs_bool(result[0], result[1]) if result != [] else False, epc_client.call_sync("get-emacs-vars", args)))
+    return list(map(lambda result: convert_emacs_bool(result[0], result[1]) if result != [] else False, epc_client.call_sync("get-emacs-vars", args))) # type: ignore
 
 def get_emacs_var(var_name):
     global epc_client
 
-    (symbol_value, symbol_is_boolean) = epc_client.call_sync("get-emacs-var", [var_name])
+    (symbol_value, symbol_is_boolean) = epc_client.call_sync("get-emacs-var", [var_name]) # type: ignore
 
     return convert_emacs_bool(symbol_value, symbol_is_boolean)
 
@@ -338,14 +329,30 @@ emacs_config_dir = ""
 
 def get_emacs_config_dir():
     import os
-    
+
     global emacs_config_dir
 
     if emacs_config_dir == "":
         emacs_config_dir = os.path.join(os.path.expanduser(get_emacs_var("eaf-config-location")), '')
+
+    if not os.path.exists(emacs_config_dir):
+        os.makedirs(emacs_config_dir)
 
     return emacs_config_dir
 
 def to_camel_case(string):
     components = string.split('_')
     return components[0] + ''.join(x.title() for x in components[1:])
+
+emacs_func_cache_dict = {}
+
+def get_emacs_func_cache_result(func_name, func_args):
+    global emacs_func_cache_dict
+
+    if func_name in emacs_func_cache_dict:
+        return emacs_func_cache_dict[func_name]
+    else:
+        result = get_emacs_func_result(func_name, func_args)
+        emacs_func_cache_dict[func_name] = result
+
+        return result

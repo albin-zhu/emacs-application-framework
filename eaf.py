@@ -22,10 +22,11 @@
 # NOTE
 # QtWebEngine will throw error "ImportError: QtWebEngineWidgets must be imported before a QCoreApplication instance is created"
 # So we import browser module before start Qt application instance to avoid this error, but we never use this module.
-from PyQt5 import QtWebEngineWidgets as NeverUsed # noqa
+from PyQt6 import QtWebEngineWidgets as NeverUsed # noqa
 
-from PyQt5.QtNetwork import QNetworkProxy, QNetworkProxyFactory
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtNetwork import QNetworkProxy, QNetworkProxyFactory
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QTimer, QThread
 from core.utils import PostGui, eval_in_emacs, init_epc_client, close_epc_client, message_to_emacs, get_emacs_vars, get_emacs_config_dir
 from epc.server import ThreadingEPCServer
 import json
@@ -34,7 +35,7 @@ import platform
 import threading
 
 if platform.system() == "Windows":
-    import pygetwindow as gw
+    import pygetwindow as gw    # type: ignore
 
 class EAF(object):
     def __init__(self, args):
@@ -46,9 +47,10 @@ class EAF(object):
         emacs_height = int(emacs_height)
 
         # Init variables.
-        self.module_dict = {}
         self.buffer_dict = {}
         self.view_dict = {}
+        
+        self.thread_queue = []
 
         for name in ["scroll_other_buffer", "eval_js_function", "eval_js_code", "action_quit", "send_key", "send_key_sequence",
                      "handle_search_forward", "handle_search_backward", "set_focus_text"]:
@@ -111,9 +113,9 @@ class EAF(object):
 
         proxy = QNetworkProxy()
         if self.proxy[0] == "socks5":
-            proxy.setType(QNetworkProxy.Socks5Proxy)
+            proxy.setType(QNetworkProxy.ProxyType.Socks5Proxy)
         elif self.proxy[0] == "http":
-            proxy.setType(QNetworkProxy.HttpProxy)
+            proxy.setType(QNetworkProxy.ProxyType.HttpProxy)
         proxy.setHostName(self.proxy[1])
         proxy.setPort(int(self.proxy[2]))
 
@@ -126,7 +128,7 @@ class EAF(object):
         proxy_string = ""
 
         proxy = QNetworkProxy()
-        proxy.setType(QNetworkProxy.NoProxy)
+        proxy.setType(QNetworkProxy.ProxyType.NoProxy)
 
         self.is_proxy = False
         QNetworkProxy.setApplicationProxy(proxy)
@@ -140,10 +142,10 @@ class EAF(object):
     @PostGui()
     def update_buffer_with_url(self, module_path, buffer_url, update_data):
         ''' Update buffer with url '''
-        if type(buffer_id) == str and buffer_id in self.buffer_dict:
-            buffer = self.buffer_dict[buffer_id]
+        for buffer in list(self.buffer_dict.values()):
             if buffer.module_path == module_path and buffer.url == buffer_url:
                 buffer.update_with_data(update_data)
+                break
 
     @PostGui()
     def new_buffer(self, buffer_id, url, module_path, arguments):
@@ -159,14 +161,13 @@ class EAF(object):
         
         global emacs_width, emacs_height, proxy_string
 
-        # Load module with app absolute path.
-        if module_path in self.module_dict:
-            module = self.module_dict[module_path]
-        else:
-            spec = importlib.util.spec_from_file_location("AppBuffer", module_path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            self.module_dict[module_path] = module
+        # Always load module with app absolute path.
+        # 
+        # Don't cache module in memory, 
+        # this is very convenient for EAF to load the latest application code in real time without the need for kill EAF process.
+        spec = importlib.util.spec_from_file_location("AppBuffer", module_path) # type: ignore
+        module = importlib.util.module_from_spec(spec) # type: ignore
+        spec.loader.exec_module(module)
 
         # Create application buffer.
         app_buffer = module.AppBuffer(buffer_id, url, arguments)
@@ -234,8 +235,12 @@ class EAF(object):
             for view_info in view_infos:
                 if view_info not in self.view_dict:
                     (buffer_id, _, _, _, _, _) = view_info.split(":")
-                    view = View(self.buffer_dict[buffer_id], view_info)
-                    self.view_dict[view_info] = view
+                    try:
+                        view = View(self.buffer_dict[buffer_id], view_info)
+                        self.view_dict[view_info] = view
+                    except KeyError:
+                        eval_in_emacs('eaf--rebuild-buffer', [])
+                        message_to_emacs("Buffer id '{}' not exists, rebuild EAF buffer.".format(buffer_id))
 
         # Call some_view_show interface when buffer's view switch back.
         # Note, this must call after new view create, otherwise some buffer,
@@ -290,6 +295,15 @@ class EAF(object):
 
         destroy_view_list = []
 
+    def button_press_on_eaf_window(self):
+        for key in self.buffer_dict:
+            buffer_widget = self.buffer_dict[key].buffer_widget
+            
+            if hasattr(buffer_widget, "is_button_press") and buffer_widget.is_button_press:
+                return True
+            
+        return False    
+        
     @PostGui()
     def kill_buffer(self, buffer_id):
         ''' Kill all view based on buffer_id and clean buffer from buffer dict.'''
@@ -305,6 +319,54 @@ class EAF(object):
 
             self.buffer_dict[buffer_id].destroy_buffer()
             self.buffer_dict.pop(buffer_id, None)
+    
+    @PostGui()
+    def clip_buffer(self, buffer_id):
+        '''Clip the image of buffer for display.'''
+        eaf_config_dir = get_emacs_config_dir()
+        for key in list(self.view_dict):
+            view = self.view_dict[key]
+            if buffer_id == view.buffer_id:
+                image = view.screen_shot().save(os.path.join(eaf_config_dir, buffer_id + ".jpeg"))
+
+    @PostGui()
+    def ocr_buffer(self, buffer_id):
+        try:
+            import easyocr
+            import tempfile
+
+            for key in list(self.view_dict):
+                view = self.view_dict[key]
+                if buffer_id == view.buffer_id:
+                    message_to_emacs("Start OCR current buffer, it's need few seconds to analyze...")
+                    
+                    import tempfile
+                    image_path = os.path.join(tempfile.gettempdir(), buffer_id + ".png")
+                    image = view.screen_shot().save(image_path)
+                    
+                    thread = OCRThread(image_path)
+                    self.thread_queue.append(thread)
+                    thread.start()
+        except:
+            import traceback
+            traceback.print_exc()
+            message_to_emacs("Please execute command `pip3 install easyocr` to install easyocr first.")
+    
+    @PostGui()
+    def show_buffer_view(self, buffer_id):
+        '''Show the single buffer view.'''
+        for key in list(self.view_dict):
+            view = self.view_dict[key]
+            if buffer_id == view.buffer_id:
+               view.try_show_top_view() 
+    
+    @PostGui()
+    def hide_buffer_view(self, buffer_id):
+        '''Hide the single buffer view.'''
+        for key in list(self.view_dict):
+            view = self.view_dict[key]
+            if buffer_id == view.buffer_id:
+               view.try_hide_top_view() 
 
     @PostGui()
     def kill_emacs(self):
@@ -365,8 +427,11 @@ class EAF(object):
 
     def activate_emacs_win32_window(self, frame_title):
         if platform.system() == "Windows":
-            w = gw.getWindowsWithTitle(frame_title)
-            w[0].activate()
+            try:
+                w = gw.getWindowsWithTitle(frame_title)
+                w[0].activate()
+            except:
+                message_to_emacs('''Emacs title is empty cause EAF can not active Emacs window, plase add (setq frame-title-format "Emacs") in your config to active Emacs window.''')
 
     @PostGui()
     def handle_input_response(self, buffer_id, callback_tag, callback_result):
@@ -401,6 +466,9 @@ class EAF(object):
         ''' Open devtools tab'''
         self.devtools_page = web_page
         eval_in_emacs('eaf-open-devtool-page', [])
+        
+        # We need adjust web window size after open developer tool.
+        QTimer().singleShot(1000, lambda : eval_in_emacs('eaf-monitor-configuration-change', []))
 
     def save_buffer_session(self, buf):
         ''' Save buffer session to file.'''
@@ -457,6 +525,22 @@ class EAF(object):
     def cleanup(self):
         '''Do some cleanup before exit python process.'''
         close_epc_client()
+        
+class OCRThread(QThread):
+
+    def __init__(self, image_path):
+        QThread.__init__(self)
+
+        self.image_path = image_path
+
+    def run(self):
+        import easyocr
+        reader = easyocr.Reader(['ch_sim','en']) 
+        result = reader.readtext(self.image_path)
+        eval_in_emacs("eaf-ocr-buffer-record", [''.join(list(map(lambda r: r[1], result)))])
+        
+        import os
+        os.remove(self.image_path)
 
 if __name__ == "__main__":
     import sys
@@ -475,9 +559,13 @@ if __name__ == "__main__":
             "--enable-gpu-rasterization",
             "--enable-native-gpu-memory-buffers"]
 
+
     app = QApplication(sys.argv + ["--disable-web-security", "--no-sandbox"] + hardware_acceleration_args)
+    #app = QApplication(sys.argv + ["--disable-web-security"] + hardware_acceleration_args)
+    app.setApplicationName("eaf.py")
+
 
     eaf = EAF(sys.argv[1:])
 
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    sys.exit(app.exec_())
+    sys.exit(app.exec())

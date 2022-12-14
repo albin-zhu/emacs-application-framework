@@ -5,7 +5,7 @@ import argparse
 import datetime
 import json
 import os
-import platform
+import site
 import subprocess
 import sys
 
@@ -40,7 +40,8 @@ parser.add_argument("--use-gitee", action="store_true",
                     help='alias of --use-mirror')
 args = parser.parse_args()
 
-NPM_CMD = "npm.cmd" if platform.system() == "Windows" else "npm"
+NPM_CMD = "npm.cmd" if sys.platform == "win32" else "npm"
+PIP_CMD = "pip3" if which("pip3") else "pip" # mac only have pip3, so we need use pip3 instead pip
 
 class bcolors:
     HEADER = '\033[95m'
@@ -65,8 +66,12 @@ def get_available_apps_dict():
 
 available_apps_dict = get_available_apps_dict()
 
+install_failed_sys = []
+install_failed_pys = []
+install_failed_apps = []
+
 important_messages = [
-    "[EAF] Please run both 'git pull' and 'install-eaf.py' (M-x eaf-install-and-update) to update EAF, applications and their dependencies."
+    "[EAF] Please run 'git pull ; ./install-eaf.py' (M-x eaf-install-and-update) to update EAF, applications and their dependencies."
 ]
 
 def run_command(command, path=script_path, ensure_pass=True, get_result=False):
@@ -86,7 +91,7 @@ def run_command(command, path=script_path, ensure_pass=True, get_result=False):
                                    universal_newlines=True, text=True, cwd=path)
     process.wait()
     if process.returncode != 0 and ensure_pass:
-        sys.exit(process.returncode)
+        raise Exception(process.returncode)
     if get_result:
         return process.stdout.readlines()
     else:
@@ -110,13 +115,13 @@ def get_archlinux_aur_helper():
     if command:
         return command
     else:
-        print("Please install one of AUR's helper.", file=std.err)
+        print("Please install one of AUR's helper, such as 'pacaur', 'yay', 'yaourt', 'paru', etc.", file=sys.stderr)
         sys.exit(1)
 
 def install_sys_deps(distro: str, deps_list):
     deps_list = prune_existing_sys_deps(deps_list)
     command = []
-    if which("dnf"):
+    if distro == 'dnf':
         command = ['sudo', 'dnf', '-y', 'install']
     elif distro == 'emerge':
         command = ['sudo', 'emerge']
@@ -130,12 +135,24 @@ def install_sys_deps(distro: str, deps_list):
     elif which("zypper"):
         command = ['sudo', 'zypper', 'install','-y']
     command.extend(deps_list)
-    return run_command(command)
+    try:
+        run_command(command)
+    except Exception as e:
+        print("Error: e")
+        install_failed_sys.append(' '.join(command))
 
 def install_py_deps(deps_list):
-    command = ['pip', 'install', '--user']
+    if sys.prefix == sys.base_prefix:
+        command = [PIP_CMD, 'install', '--user', '-U']
+    else:
+        # if running on a virtual env, --user option is not valid.
+        command = [PIP_CMD, 'install', '-U']
     command.extend(deps_list)
-    return run_command(command)
+    try:
+        run_command(command)
+    except Exception as e:
+        print("Error:", e)
+        install_failed_pys.append(' '.join(command))
 
 def remove_node_modules_path(app_path_list):
     for app_path in app_path_list:
@@ -146,39 +163,59 @@ def remove_node_modules_path(app_path_list):
 
 def install_npm_install(app_path_list):
     for app_path in app_path_list:
-        command = [NPM_CMD, "install"]
-        run_command(command, path=app_path)
+        command = [NPM_CMD, "install", "--force"]
+        try:
+            run_command(command, path=app_path)
+        except Exception as e:
+            print("Error:", e)
+            install_failed_apps.append(app_path)
 
 def install_npm_rebuild(app_path_list):
     for app_path in app_path_list:
-        command = [NPM_CMD, 'rebuild']
-        run_command(command, path=app_path)
+        command = [NPM_CMD, "rebuild"]
+        try:
+            run_command(command, path=app_path)
+        except Exception as e:
+            print("Error:", e)
+            install_failed_apps.append(app_path)
 
 def install_vue_install(app_path_list):
     for app_path in app_path_list:
-        command = [NPM_CMD, 'install']
-        run_command(command, path=app_path)
-        command = [NPM_CMD, 'run', 'build']
-        run_command(command, path=app_path)
+        command = [NPM_CMD, "install", "--force"]
+        try:
+            run_command(command, path=app_path)
+        except Exception as e:
+            print("Error:", e)
+            install_failed_apps.append(app_path)
+        command = [NPM_CMD, "run", "build"]
+        try:
+            run_command(command, path=app_path)
+        except Exception as e:
+            print("Error:", e)
+            install_failed_apps.append(app_path)
 
 def add_or_update_app(app: str, app_spec_dict):
     url = ""
     path = os.path.join("app", app)
+
+    if os.path.exists(path):
+        print("\n[EAF] Updating", app, "to newest version...")
+    else:
+        print("\n[EAF] Adding", app, "application to EAF...")
+
     if args.use_mirror or args.use_gitee: # use_gitee is alias of use_mirror.
         if 'mirror_url' not in app_spec_dict:
-            print("[EAF] There is no gitee mirror URL set in applications.json", app)
-            sys.exit(1)
-        url = app_spec_dict['mirror_url']
+            print("[EAF] There is no mirror URL set in applications.json for", app)
+            print("[EAF] Using default URL...")
+            url = app_spec_dict['url']
+        else:
+            url = app_spec_dict['mirror_url']
     else:
         url = app_spec_dict['url']
 
     branch = app_spec_dict['branch']
     time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 
-    if os.path.exists(path):
-        print("\n[EAF] Updating", app, "to newest version...")
-    else:
-        print("\n[EAF] Adding", app, "application to EAF...")
 
     updated = True
     if os.path.exists(path):
@@ -194,23 +231,47 @@ def add_or_update_app(app: str, app_spec_dict):
             run_command(["git", "checkout", branch], path=path, ensure_pass=False)
             run_command(["git", "reset", "--hard", "origin"], path=path, ensure_pass=False)
 
-        output_lines = run_command(["git", "pull"], path=path, get_result=True)
+        branch_outputs = run_command(["git", "branch"], path=path, get_result=True)
+        if branch_outputs is None:
+            raise Exception("Not in git app!")
+        exist_branch = False
+        for b in branch_outputs:
+            if branch in b:
+                exist_branch = True
+                break
+        if not exist_branch:
+            run_command(["git", "config", "remote.origin.fetch", "+refs/heads/"+branch+":refs/remotes/origin/"+branch], path=path)
+            if args.git_full_clone:
+                run_command(["git", "fetch", "origin", branch], path=path)
+            else:
+                run_command(["git", "fetch", "origin", branch, "--depth", "1"], path=path)
+
+        current_branch_outputs = run_command(["git", "symbolic-ref", "HEAD"], path=path, get_result=True)
+        if current_branch_outputs is None:
+            raise Exception("git symbolic-ref failed!")
+        current_branch = current_branch_outputs[0]
+        if branch not in current_branch:
+            run_command(["git", "checkout", branch], path=path)
+
+        output_lines = run_command(["git", "pull", "origin", branch], path=path, get_result=True)
         if output_lines is None:
             raise Exception("git pull failed!")
         for output in output_lines:
             print(output.rstrip())
             if "Already up to date." in output:
-                updated = False
+                updated = False if branch in current_branch else True
 
     elif args.git_full_clone:
-        run_command(["git", "clone", "--single-branch", url, path])
+        run_command(["git", "clone", "-b", branch, url, path])
     else:
-        run_command(["git", "clone", "--depth", "1", "--single-branch", url, path])
+        run_command(["git", "clone", "-b", branch, "--depth", "1", url, path])
     return updated
 
 def get_distro():
     distro = ""
-    if which("dnf"):
+    if sys.platform != "linux":
+        pass
+    elif which("dnf"):
         distro = "dnf"
     elif which("emerge"):
         distro = "emerge"
@@ -245,6 +306,7 @@ def install_core_deps(distro, deps_dict):
             install_sys_deps(distro, core_deps)
     if (not args.ignore_py_deps or sys.platform != "linux") and sys.platform in deps_dict["pip"]:
         install_py_deps(deps_dict["pip"][sys.platform])
+
     print("[EAF] Finished installing core dependencies")
 
 def yes_no(question, default_yes=False, default_no=False):
@@ -257,7 +319,13 @@ def yes_no(question, default_yes=False, default_no=False):
         return key.lower() == 'y'
 
 def get_installed_apps(app_dir):
-    apps_installed = [f for f in os.listdir(app_dir) if os.path.isdir(os.path.join(app_dir, f))]
+    apps_installed = [
+        f
+        for f in os.listdir(app_dir)
+        if os.path.isdir(os.path.join(app_dir, f))
+        # directories not managed, or not part of, EAF
+        if f not in ("__pycache__",)
+    ]
     for app in apps_installed:
         git_dir = os.path.join(app_dir, app, ".git")
         if app not in get_available_apps_dict().keys():
@@ -280,7 +348,9 @@ def get_new_apps_dict(apps_installed):
             not_installed_apps_dict[app_name] = app_spec_dict
     for app_name, app_spec_dict in not_installed_apps_dict.items():
         indicator = "({}/{})".format(num, len(not_installed_apps_dict))
-        if yes_no("[EAF] " + indicator + " " + app_name + ". Install? (Y/n): ", default_yes=True):
+        prompt = "[EAF] " + indicator + " " + app_spec_dict['name'] + ". " + app_spec_dict['desc'] + " - Install?"
+        install_p = yes_no(prompt + " (Y/n): ", default_yes=True) if app_spec_dict['default_install'] == 'true' else yes_no(prompt + " (y/N): ", default_no=True)
+        if install_p:
             new_apps_dict[app_name] = app_spec_dict
         num = num + 1
     return new_apps_dict
@@ -317,12 +387,6 @@ def install_app_deps(distro, deps_dict):
     if not os.path.exists(app_dir):
         os.makedirs(app_dir)
 
-    # TODO: REMOVE ME: Delete obsolete file, we don't use it anymore
-    prev_app_choices_file = os.path.join(script_path, '.eaf-installed-apps.json')
-    if os.path.exists(prev_app_choices_file):
-        print(prev_app_choices_file, "is obsolete, removing...")
-        os.remove(prev_app_choices_file)
-
     apps_installed = get_installed_apps(app_dir)
     pending_apps_dict_list = get_install_apps(apps_installed)
 
@@ -333,11 +397,15 @@ def install_app_deps(distro, deps_dict):
     npm_rebuild_apps = []
     for pending_apps_dict in pending_apps_dict_list:
         for app_name, app_spec_dict in pending_apps_dict.items():
-            updated = add_or_update_app(app_name, app_spec_dict)
+            updated = True
+            try:
+                updated = add_or_update_app(app_name, app_spec_dict)
+            except Exception as e:
+                raise Exception("[EAF] There are unsaved changes in EAF " + app_name + " application. Please re-run command with --app-drop-local-edit or --app-save-local-edit")
             app_path = os.path.join(app_dir, app_name)
             app_dep_path = os.path.join(app_path, 'dependencies.json')
             if (updated or args.force) and os.path.exists(app_dep_path):
-                with open(os.path.join(app_dep_path)) as f:
+                with open(app_dep_path) as f:
                     deps_dict = json.load(f)
                 if not args.ignore_sys_deps and sys.platform == "linux" and distro in deps_dict:
                     sys_deps.extend(deps_dict[distro])
@@ -351,7 +419,7 @@ def install_app_deps(distro, deps_dict):
                     if 'npm_rebuild' in deps_dict and deps_dict['npm_rebuild']:
                         npm_rebuild_apps.append(app_path)
 
-    print("\n[EAF] Installing dependencies for installed applications")
+    print("\n[EAF] Installing dependencies for the selected applications")
     if not args.ignore_sys_deps and sys.platform == "linux" and len(sys_deps) > 0:
         print("[EAF] Installing system dependencies")
         install_sys_deps(distro, sys_deps)
@@ -371,13 +439,29 @@ def install_app_deps(distro, deps_dict):
         if len(vue_install_apps) > 0:
             install_vue_install(vue_install_apps)
 
-    print("[EAF] Finished installing applications and their dependencies")
-    print("[EAF] Please ensure the following are added to your init.el:")
-
+    print("\n[EAF] Please always ensure the following config are added to your init.el:")
     print_sample_config(app_dir)
 
-    for msg in important_messages:
-        print(bcolors.WARNING + msg + bcolors.ENDC)
+    global install_failed_sys
+    global install_failed_pys
+    global install_failed_apps
+    if len(install_failed_sys) > 0:
+        install_failed_sys = list(set(install_failed_sys))
+        print(bcolors.WARNING + "\n[EAF] Installation FAILED for the following system dependencies:" + bcolors.ENDC)
+        for dep in install_failed_sys: print(bcolors.WARNING + dep + bcolors.ENDC)
+    if len(install_failed_pys) > 0:
+        install_failed_pys = list(set(install_failed_pys))
+        print(bcolors.WARNING + "\n[EAF] Installation FAILED for the following Python dependencies:" + bcolors.ENDC)
+        for dep in install_failed_pys: print(bcolors.WARNING + dep + bcolors.ENDC)
+    if len(install_failed_apps) > 0:
+        install_failed_apps = list(set(install_failed_apps))
+        print(bcolors.WARNING + "\n[EAF] Installation FAILED for following applications:" + bcolors.ENDC)
+        for app in install_failed_apps: print(bcolors.WARNING + app + bcolors.ENDC)
+    if len(install_failed_sys) + len(install_failed_pys) + len(install_failed_apps) == 0:
+        print("[EAF] Installation SUCCESS!")
+    else:
+        print("[EAF] Please rerun ./install-eaf.py with `--force`, or install them manually!")
+
 
 def main():
     try:
@@ -395,7 +479,10 @@ def main():
             install_app_deps(distro, deps_dict)
             print("[EAF] ------------------------------------------")
 
-        print("[EAF] install-eaf.py finished.")
+        print("[EAF] install-eaf.py finished.\n")
+
+        for msg in important_messages:
+            print(bcolors.WARNING + msg + bcolors.ENDC)
     except KeyboardInterrupt:
         print("[EAF] install-eaf.py aborted!")
         sys.exit()
